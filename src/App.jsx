@@ -1,7 +1,17 @@
 import { useMemo, useRef, useState } from "react";
 
-// Preço do BTC em 1º de janeiro de cada ano
+// Preço do BTC em 1º de janeiro de cada ano. 2015-2025: Yahoo Finance / dados agregados
+// CoinGecko, artigo "Bitcoin's Price Every New Year's Day For Last Decade". 2012-2014: sem
+// registro de 1/jan específico numa fonte única, usei o preço de fechamento de 31/dez do ano
+// anterior (Fool.com / "Buy Bitcoin Worldwide"), que é uma aproximação razoável mas menos
+// precisa que os anos mais recentes.
 const ANCHOR_POINTS = [
+  { date: "2012-01-01", price: 4.38 },
+  { date: "2013-01-01", price: 13.41 },
+  { date: "2014-01-01", price: 770 },
+  { date: "2015-01-01", price: 314 },
+  { date: "2016-01-01", price: 436 },
+  { date: "2017-01-01", price: 998 },
   { date: "2018-01-01", price: 13657 },
   { date: "2019-01-01", price: 3843 },
   { date: "2020-01-01", price: 7200 },
@@ -13,8 +23,11 @@ const ANCHOR_POINTS = [
 ];
 const TODAY = { date: "2026-07-26", price: 64500 };
 
-const MS_PER_YEAR = 365.25 * 24 * 3600 * 1000;
 
+// Série mensal aproximada só para desenhar a forma do gráfico (não usada nos cálculos de CAGR).
+// Construída a partir de marcos de preço amplamente conhecidos (topos e fundos de ciclo).
+// Começa em 2015 pra não esmagar o eixo Y com os preços de centavos/dezenas de 2013-14.
+// Não é uma série de fechamento diário oficial — tratar como ilustrativa.
 const MONTHLY_SERIES = [
   ["2015-01", 315], ["2015-06", 230], ["2015-11", 380], ["2016-06", 670],
   ["2016-12", 960], ["2017-06", 2500], ["2017-09", 4200], ["2017-11", 9800],
@@ -28,6 +41,11 @@ const MONTHLY_SERIES = [
   ["2026-03", 70000], ["2026-06", 58000], ["2026-07", 64500],
 ];
 
+// Modelo Bitcoin Power Law (Giovanni Santostasi), parâmetros públicos amplamente citados
+// (ex. btcpowerlaw.nl / Bitcoin Observatory): log10(preço-tendência) = -16.493 + 5.688·log10(dias
+// desde o genesis block). As bandas de suporte/resistência são a tendência ±2σ em espaço log10,
+// com σ ≈ 0.2 → suporte = tendência × 10^-0.4, resistência = tendência × 10^+0.4. É um modelo
+// contestado (assim como o Long-Term Power Law que você já pesquisou), não uma garantia.
 const GENESIS_MS = Date.UTC(2009, 0, 3);
 function powerLawBands(dateMs) {
   const days = (dateMs - GENESIS_MS) / (24 * 3600 * 1000);
@@ -57,6 +75,11 @@ function fmtPct(v) {
   return v >= 0 ? "+" + s : s;
 }
 
+// ---------- geometria do gráfico (SVG puro, sem biblioteca de gráficos) ----------
+// Desenhado à mão porque múltiplas tentativas com uma biblioteca de terceiros não
+// renderizavam de forma confiável as bandas do Power Law neste ambiente. Com SVG puro
+// controlamos 100% da matemática de posicionamento, sem depender de cálculo de domínio
+// de eixo de nenhuma biblioteca externa.
 const CHART_W = 900;
 const CHART_H = 300;
 const PAD_L = 54;
@@ -119,8 +142,8 @@ function fmtTick(v) {
 export default function BtcCagrDashboard() {
   const [logScale, setLogScale] = useState(true);
   const [showPowerLaw, setShowPowerLaw] = useState(true);
-  const [futureCagr, setFutureCagr] = useState(25);
-  const [cagrDecay, setCagrDecay] = useState(10);
+  const [futureCagr, setFutureCagr] = useState(25); // % ao ano
+  const [cagrDecay, setCagrDecay] = useState(10); // % de queda do CAGR a cada ano
   const [currentPrice, setCurrentPrice] = useState(TODAY.price);
   const [priceInput, setPriceInput] = useState(String(TODAY.price));
   const [hoverIdx, setHoverIdx] = useState(null);
@@ -135,23 +158,6 @@ export default function BtcCagrDashboard() {
       setPriceInput(String(currentPrice));
     }
   }
-
-  const rows = useMemo(() => {
-    const todayMs = new Date(TODAY.date).getTime();
-    return ANCHOR_POINTS.map((point) => {
-      const startMs = new Date(point.date).getTime();
-      const years = (todayMs - startMs) / MS_PER_YEAR;
-      const ratio = currentPrice / point.price;
-      const cagr = Math.pow(ratio, 1 / years) - 1;
-      return {
-        years,
-        startDate: new Date(point.date),
-        start: point.price,
-        end: currentPrice,
-        cagr,
-      };
-    });
-  }, [currentPrice]);
 
   const projectedRows = useMemo(() => {
     const r0 = futureCagr / 100;
@@ -168,12 +174,55 @@ export default function BtcCagrDashboard() {
     return out;
   }, [futureCagr, cagrDecay, currentPrice]);
 
+  // mapa ano -> preço, combinando histórico (1/jan), o preço atual (editável, usado
+  // como proxy do ano corrente) e a simulação (anos futuros)
+  const yearlyPrices = useMemo(() => {
+    const map = {};
+    ANCHOR_POINTS.forEach((a) => {
+      map[new Date(a.date).getFullYear()] = a.price;
+    });
+    map[new Date(TODAY.date).getFullYear()] = currentPrice;
+    projectedRows.forEach((p) => {
+      map[p.year] = p.price;
+    });
+    return map;
+  }, [currentPrice, projectedRows]);
+
+  // janelas móveis de 4 anos (2012–2016, 2013–2017, ...), incluindo janelas que já
+  // usam anos futuros simulados assim que a projeção os preenche
+  const WINDOW = 4;
+  const rollingCagrRows = useMemo(() => {
+    const years = Object.keys(yearlyPrices).map(Number).sort((a, b) => a - b);
+    if (!years.length) return [];
+    const minYear = years[0];
+    const maxYear = years[years.length - 1];
+    const currentYear = new Date(TODAY.date).getFullYear();
+    const out = [];
+    for (let y = minYear; y + WINDOW <= maxYear; y++) {
+      const startP = yearlyPrices[y];
+      const endP = yearlyPrices[y + WINDOW];
+      if (startP == null || endP == null) continue;
+      const cagr = Math.pow(endP / startP, 1 / WINDOW) - 1;
+      out.push({
+        startYear: y,
+        endYear: y + WINDOW,
+        start: startP,
+        end: endP,
+        cagr,
+        simulated: y + WINDOW > currentYear,
+      });
+    }
+    return out;
+  }, [yearlyPrices]);
+
   const chartData = useMemo(() => {
     const historical = MONTHLY_SERIES.map(([ym, price]) => {
       const [y, m] = ym.split("-").map(Number);
       const dateMs = Date.UTC(y, m - 1, 15);
       return { date: ym.slice(0, 4), price, ...powerLawBands(dateMs) };
     });
+    // ponto de junção: substitui o último preço histórico (fixo) pelo preço
+    // atual editável, pra tabela e gráfico ficarem consistentes
     const [lastY, lastM] = MONTHLY_SERIES[MONTHLY_SERIES.length - 1][0].split("-").map(Number);
     const lastDateMs = Date.UTC(lastY, lastM - 1, 15);
     const last = {
@@ -183,7 +232,7 @@ export default function BtcCagrDashboard() {
       ...powerLawBands(lastDateMs),
     };
     const future = projectedRows.map((p) => {
-      const dateMs = Date.UTC(p.year, 6, 26);
+      const dateMs = Date.UTC(p.year, 6, 26); // julho = mês 6 (0-indexed)
       return { date: String(p.year), projected: p.price, ...powerLawBands(dateMs) };
     });
     return [...historical.slice(0, -1), last, ...future];
@@ -192,10 +241,14 @@ export default function BtcCagrDashboard() {
   const finalProjectedPrice = projectedRows[projectedRows.length - 1]?.price;
   const finalMultiple = finalProjectedPrice ? finalProjectedPrice / currentPrice : null;
 
+  // ---- geometria calculada a partir dos dados ----
   const geo = useMemo(() => {
     const n = chartData.length;
     const xFn = makeXScale(n);
 
+    // domínio ÚNICO e compartilhado: preço, simulação e power law usam a MESMA
+    // escala Y, senão o mesmo valor em dólar cai em alturas diferentes dependendo
+    // da linha (foi exatamente o bug da versão anterior)
     let max = 0;
     let min = Infinity;
     for (const d of chartData) {
@@ -250,6 +303,7 @@ export default function BtcCagrDashboard() {
   const hoverPoint = hoverIdx != null ? chartData[hoverIdx] : null;
   const hoverX = hoverIdx != null ? geo.xFn(hoverIdx) : null;
 
+  // rótulos do eixo X: mostra só uma amostra pra não lotar o eixo
   const xLabelStep = Math.max(1, Math.ceil(chartData.length / 14));
 
   return (
@@ -258,7 +312,7 @@ export default function BtcCagrDashboard() {
         fontFamily: "'JetBrains Mono', 'Courier New', monospace",
         background: "#0b0e11",
         color: "#e8e6df",
-        minHeight: "100vh",
+        minHeight: "100%",
         padding: "28px 20px",
       }}
     >
@@ -271,6 +325,7 @@ export default function BtcCagrDashboard() {
       `}</style>
 
       <div style={{ maxWidth: 880, margin: "0 auto" }}>
+        {/* Header */}
         <div
           style={{
             display: "flex",
@@ -339,379 +394,435 @@ export default function BtcCagrDashboard() {
           </div>
         </div>
 
-        <div
-          style={{
-            border: "1px solid #23282f",
-            borderRadius: 8,
-            padding: "16px 8px 8px",
-            marginBottom: 24,
-            background: "#0e1216",
-          }}
-        >
+        <>
+          {/* Chart */}
           <div
             style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              padding: "0 12px 12px",
-              flexWrap: "wrap",
-              gap: 8,
+              border: "1px solid #23282f",
+              borderRadius: 8,
+              padding: "16px 8px 8px",
+              marginBottom: 24,
+              background: "#0e1216",
             }}
           >
-            <span style={{ fontSize: 12, color: "#7a8189" }}>
-              histórico (aprox.) + simulação
-            </span>
-            <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-              <span style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "#7a8189" }}>
-                <span style={{ width: 10, height: 2, background: "#f5b544", display: "inline-block" }} />
-                histórico
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                padding: "0 12px 12px",
+                flexWrap: "wrap",
+                gap: 8,
+              }}
+            >
+              <span style={{ fontSize: 12, color: "#7a8189" }}>
+                histórico (aprox.) + simulação
               </span>
-              <span style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "#7a8189" }}>
-                <span style={{ width: 10, height: 2, background: "#5fc9e8", display: "inline-block", borderTop: "1px dashed #5fc9e8" }} />
-                simulação
-              </span>
-              <button
-                onClick={() => setShowPowerLaw((v) => !v)}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 5,
-                  fontSize: 11,
-                  color: showPowerLaw ? "#7a8189" : "#4a4f57",
-                  background: "none",
-                  border: "none",
-                  fontFamily: "inherit",
-                  cursor: "pointer",
-                  padding: 0,
-                }}
+              <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+                <span style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "#7a8189" }}>
+                  <span style={{ width: 10, height: 2, background: "#f5b544", display: "inline-block" }} />
+                  histórico
+                </span>
+                <span style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "#7a8189" }}>
+                  <span style={{ width: 10, height: 2, background: "#5fc9e8", display: "inline-block", borderTop: "1px dashed #5fc9e8" }} />
+                  simulação
+                </span>
+                <button
+                  onClick={() => setShowPowerLaw((v) => !v)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 5,
+                    fontSize: 11,
+                    color: showPowerLaw ? "#7a8189" : "#4a4f57",
+                    background: "none",
+                    border: "none",
+                    fontFamily: "inherit",
+                    cursor: "pointer",
+                    padding: 0,
+                  }}
+                >
+                  <span style={{ width: 10, height: 2, background: showPowerLaw ? "#c084fc" : "#3a3f47", display: "inline-block", borderTop: `1px dashed ${showPowerLaw ? "#c084fc" : "#3a3f47"}` }} />
+                  power law {showPowerLaw ? "(on)" : "(off)"}
+                </button>
+                <button
+                  className="bcd-toggle"
+                  onClick={() => setLogScale((v) => !v)}
+                  style={{
+                    fontFamily: "inherit",
+                    fontSize: 11,
+                    color: "#0b0e11",
+                    background: "#f5b544",
+                    border: "none",
+                    borderRadius: 4,
+                    padding: "4px 10px",
+                    cursor: "pointer",
+                  }}
+                >
+                  escala: {logScale ? "log" : "linear"}
+                </button>
+              </div>
+            </div>
+
+            <div style={{ position: "relative" }}>
+              <svg
+                ref={svgRef}
+                viewBox={`0 0 ${CHART_W} ${CHART_H}`}
+                width="100%"
+                height={260}
+                style={{ display: "block" }}
+                onMouseMove={handleMove}
+                onMouseLeave={() => setHoverIdx(null)}
               >
-                <span style={{ width: 10, height: 2, background: showPowerLaw ? "#c084fc" : "#3a3f47", display: "inline-block", borderTop: `1px dashed ${showPowerLaw ? "#c084fc" : "#3a3f47"}` }} />
-                power law {showPowerLaw ? "(on)" : "(off)"}
-              </button>
-              <button
-                className="bcd-toggle"
-                onClick={() => setLogScale((v) => !v)}
-                style={{
-                  fontFamily: "inherit",
-                  fontSize: 11,
-                  color: "#0b0e11",
-                  background: "#f5b544",
-                  border: "none",
-                  borderRadius: 4,
-                  padding: "4px 10px",
-                  cursor: "pointer",
-                }}
-              >
-                escala: {logScale ? "log" : "linear"}
-              </button>
+                <defs>
+                  <linearGradient id="btcFill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#f5b544" stopOpacity={0.35} />
+                    <stop offset="100%" stopColor="#f5b544" stopOpacity={0} />
+                  </linearGradient>
+                  <linearGradient id="projFill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#5fc9e8" stopOpacity={0.25} />
+                    <stop offset="100%" stopColor="#5fc9e8" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+
+                {/* grade horizontal + labels do eixo Y */}
+                {geo.priceTicks.map((t, i) => {
+                  const y = geo.yFn(Math.max(t, logScale ? geo.yMin : 0));
+                  return (
+                    <g key={i}>
+                      <line x1={PAD_L} x2={CHART_W - PAD_R} y1={y} y2={y} stroke="#1c2127" />
+                      <text x={PAD_L - 6} y={y + 3} textAnchor="end" fontSize="10" fill="#7a8189">
+                        {fmtTick(t)}
+                      </text>
+                    </g>
+                  );
+                })}
+
+                {/* eixo X: labels de ano, amostrados */}
+                {chartData.map((d, i) =>
+                  i % xLabelStep === 0 ? (
+                    <text
+                      key={i}
+                      x={geo.xFn(i)}
+                      y={CHART_H - 8}
+                      textAnchor="middle"
+                      fontSize="10"
+                      fill="#7a8189"
+                    >
+                      {d.date}
+                    </text>
+                  ) : null
+                )}
+
+                {/* power law: desenhado antes do preço, fica "atrás" visualmente */}
+                {showPowerLaw && (
+                  <>
+                    <path d={geo.ceilPath} fill="none" stroke="#c084fc" strokeWidth="2" strokeDasharray="5 4" />
+                    <path d={geo.floorPath} fill="none" stroke="#c084fc" strokeWidth="2" strokeDasharray="5 4" />
+                  </>
+                )}
+
+                {/* histórico de preço */}
+                <path d={geo.priceAreaPath} fill="url(#btcFill)" stroke="none" />
+                <path d={geo.pricePath} fill="none" stroke="#f5b544" strokeWidth="1.8" />
+
+                {/* simulação futura */}
+                <path d={geo.projAreaPath} fill="url(#projFill)" stroke="none" />
+                <path d={geo.projPath} fill="none" stroke="#5fc9e8" strokeWidth="1.8" strokeDasharray="6 4" />
+
+                {/* linha vertical de hover */}
+                {hoverX != null && (
+                  <line x1={hoverX} x2={hoverX} y1={PAD_T} y2={CHART_H - PAD_B} stroke="#3a3f47" strokeDasharray="2 2" />
+                )}
+              </svg>
+
+              {/* tooltip */}
+              {hoverPoint && (
+                <div
+                  style={{
+                    position: "absolute",
+                    left: `${Math.min(85, Math.max(2, (hoverX / CHART_W) * 100))}%`,
+                    top: 6,
+                    transform: hoverX / CHART_W > 0.7 ? "translateX(-100%)" : "none",
+                    background: "#14181d",
+                    border: "1px solid #23282f",
+                    borderRadius: 6,
+                    fontSize: 11,
+                    padding: "6px 9px",
+                    pointerEvents: "none",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  <div style={{ color: "#7a8189", marginBottom: 2 }}>{hoverPoint.date}</div>
+                  {hoverPoint.price != null && (
+                    <div style={{ color: "#f5b544" }}>preço: {fmtUsd(hoverPoint.price)}</div>
+                  )}
+                  {hoverPoint.projected != null && (
+                    <div style={{ color: "#5fc9e8" }}>simulação: {fmtUsd(hoverPoint.projected)}</div>
+                  )}
+                  {showPowerLaw && hoverPoint.plCeiling != null && (
+                    <div style={{ color: "#c084fc" }}>power law (resist.): {fmtUsd(hoverPoint.plCeiling)}</div>
+                  )}
+                  {showPowerLaw && hoverPoint.plFloor != null && (
+                    <div style={{ color: "#c084fc" }}>power law (suporte): {fmtUsd(hoverPoint.plFloor)}</div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
-          <div style={{ position: "relative" }}>
-            <svg
-              ref={svgRef}
-              viewBox={`0 0 ${CHART_W} ${CHART_H}`}
-              width="100%"
-              height={260}
-              style={{ display: "block" }}
-              onMouseMove={handleMove}
-              onMouseLeave={() => setHoverIdx(null)}
+          {/* Simulação */}
+          <div
+            style={{
+              border: "1px solid #23282f",
+              borderRadius: 8,
+              padding: "18px 20px",
+              marginBottom: 24,
+              background: "#0e1216",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "baseline",
+                marginBottom: 10,
+                flexWrap: "wrap",
+                gap: 8,
+              }}
             >
-              <defs>
-                <linearGradient id="btcFill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#f5b544" stopOpacity={0.35} />
-                  <stop offset="100%" stopColor="#f5b544" stopOpacity={0} />
-                </linearGradient>
-                <linearGradient id="projFill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#5fc9e8" stopOpacity={0.25} />
-                  <stop offset="100%" stopColor="#5fc9e8" stopOpacity={0} />
-                </linearGradient>
-              </defs>
+              <span style={{ fontSize: 12, color: "#7a8189" }}>
+                simulação: CAGR inicial nos próximos {PROJECTION_YEARS} anos
+              </span>
+              <span style={{ fontSize: 22, fontWeight: 700, color: "#5fc9e8" }}>
+                {futureCagr}% a.a.
+              </span>
+            </div>
+            <input
+              type="range"
+              min={-30}
+              max={100}
+              step={1}
+              value={futureCagr}
+              onChange={(e) => setFutureCagr(Number(e.target.value))}
+              style={{
+                width: "100%",
+                accentColor: "#5fc9e8",
+                cursor: "pointer",
+              }}
+            />
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                fontSize: 10,
+                color: "#5c636b",
+                marginTop: 4,
+                marginBottom: 18,
+              }}
+            >
+              <span>-30%</span>
+              <span>0%</span>
+              <span>25%</span>
+              <span>50%</span>
+              <span>75%</span>
+              <span>100%</span>
+            </div>
 
-              {geo.priceTicks.map((t, i) => {
-                const y = geo.yFn(Math.max(t, logScale ? geo.yMin : 0));
-                return (
-                  <g key={i}>
-                    <line x1={PAD_L} x2={CHART_W - PAD_R} y1={y} y2={y} stroke="#1c2127" />
-                    <text x={PAD_L - 6} y={y + 3} textAnchor="end" fontSize="10" fill="#7a8189">
-                      {fmtTick(t)}
-                    </text>
-                  </g>
-                );
-              })}
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "baseline",
+                marginBottom: 10,
+                flexWrap: "wrap",
+                gap: 8,
+              }}
+            >
+              <span style={{ fontSize: 12, color: "#7a8189" }}>
+                queda do CAGR a cada ano (retornos decrescentes)
+              </span>
+              <span style={{ fontSize: 22, fontWeight: 700, color: "#c084fc" }}>
+                -{cagrDecay}% a.a.
+              </span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={50}
+              step={1}
+              value={cagrDecay}
+              onChange={(e) => setCagrDecay(Number(e.target.value))}
+              style={{
+                width: "100%",
+                accentColor: "#c084fc",
+                cursor: "pointer",
+              }}
+            />
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                fontSize: 10,
+                color: "#5c636b",
+                marginTop: 4,
+              }}
+            >
+              <span>0% (constante)</span>
+              <span>10%</span>
+              <span>20%</span>
+              <span>30%</span>
+              <span>40%</span>
+              <span>50%</span>
+            </div>
 
-              {chartData.map((d, i) =>
-                i % xLabelStep === 0 ? (
-                  <text
-                    key={i}
-                    x={geo.xFn(i)}
-                    y={CHART_H - 8}
-                    textAnchor="middle"
-                    fontSize="10"
-                    fill="#7a8189"
-                  >
-                    {d.date}
-                  </text>
-                ) : null
-              )}
-
-              {showPowerLaw && (
-                <>
-                  <path d={geo.ceilPath} fill="none" stroke="#c084fc" strokeWidth="2" strokeDasharray="5 4" />
-                  <path d={geo.floorPath} fill="none" stroke="#c084fc" strokeWidth="2" strokeDasharray="5 4" />
-                </>
-              )}
-
-              <path d={geo.priceAreaPath} fill="url(#btcFill)" stroke="none" />
-              <path d={geo.pricePath} fill="none" stroke="#f5b544" strokeWidth="1.8" />
-
-              <path d={geo.projAreaPath} fill="url(#projFill)" stroke="none" />
-              <path d={geo.projPath} fill="none" stroke="#5fc9e8" strokeWidth="1.8" strokeDasharray="6 4" />
-
-              {hoverX != null && (
-                <line x1={hoverX} x2={hoverX} y1={PAD_T} y2={CHART_H - PAD_B} stroke="#3a3f47" strokeDasharray="2 2" />
-              )}
-            </svg>
-
-            {hoverPoint && (
-              <div
-                style={{
-                  position: "absolute",
-                  left: `${Math.min(85, Math.max(2, (hoverX / CHART_W) * 100))}%`,
-                  top: 6,
-                  transform: hoverX / CHART_W > 0.7 ? "translateX(-100%)" : "none",
-                  background: "#14181d",
-                  border: "1px solid #23282f",
-                  borderRadius: 6,
-                  fontSize: 11,
-                  padding: "6px 9px",
-                  pointerEvents: "none",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                <div style={{ color: "#7a8189", marginBottom: 2 }}>{hoverPoint.date}</div>
-                {hoverPoint.price != null && (
-                  <div style={{ color: "#f5b544" }}>preço: {fmtUsd(hoverPoint.price)}</div>
-                )}
-                {hoverPoint.projected != null && (
-                  <div style={{ color: "#5fc9e8" }}>simulação: {fmtUsd(hoverPoint.projected)}</div>
-                )}
-                {showPowerLaw && hoverPoint.plCeiling != null && (
-                  <div style={{ color: "#c084fc" }}>power law (resist.): {fmtUsd(hoverPoint.plCeiling)}</div>
-                )}
-                {showPowerLaw && hoverPoint.plFloor != null && (
-                  <div style={{ color: "#c084fc" }}>power law (suporte): {fmtUsd(hoverPoint.plFloor)}</div>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div
-          style={{
-            border: "1px solid #23282f",
-            borderRadius: 8,
-            padding: "18px 20px",
-            marginBottom: 24,
-            background: "#0e1216",
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "baseline",
-              marginBottom: 10,
-              flexWrap: "wrap",
-              gap: 8,
-            }}
-          >
-            <span style={{ fontSize: 12, color: "#7a8189" }}>
-              simulação: CAGR inicial nos próximos {PROJECTION_YEARS} anos
-            </span>
-            <span style={{ fontSize: 22, fontWeight: 700, color: "#5fc9e8" }}>
-              {futureCagr}% a.a.
-            </span>
-          </div>
-          <input
-            type="range"
-            min={-30}
-            max={100}
-            step={1}
-            value={futureCagr}
-            onChange={(e) => setFutureCagr(Number(e.target.value))}
-            style={{
-              width: "100%",
-              accentColor: "#5fc9e8",
-              cursor: "pointer",
-            }}
-          />
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              fontSize: 10,
-              color: "#5c636b",
-              marginTop: 4,
-              marginBottom: 18,
-            }}
-          >
-            <span>-30%</span>
-            <span>0%</span>
-            <span>25%</span>
-            <span>50%</span>
-            <span>75%</span>
-            <span>100%</span>
-          </div>
-
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "baseline",
-              marginBottom: 10,
-              flexWrap: "wrap",
-              gap: 8,
-            }}
-          >
-            <span style={{ fontSize: 12, color: "#7a8189" }}>
-              queda do CAGR a cada ano (retornos decrescentes)
-            </span>
-            <span style={{ fontSize: 22, fontWeight: 700, color: "#c084fc" }}>
-              -{cagrDecay}% a.a.
-            </span>
-          </div>
-          <input
-            type="range"
-            min={0}
-            max={50}
-            step={1}
-            value={cagrDecay}
-            onChange={(e) => setCagrDecay(Number(e.target.value))}
-            style={{
-              width: "100%",
-              accentColor: "#c084fc",
-              cursor: "pointer",
-            }}
-          />
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              fontSize: 10,
-              color: "#5c636b",
-              marginTop: 4,
-            }}
-          >
-            <span>0% (constante)</span>
-            <span>10%</span>
-            <span>20%</span>
-            <span>30%</span>
-            <span>40%</span>
-            <span>50%</span>
-          </div>
-
-          <div
-            style={{
-              marginTop: 16,
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))",
-              gap: 8,
-            }}
-          >
-            {projectedRows.map((p) => (
-              <div
-                key={p.year}
-                style={{
-                  border: "1px solid #1c2127",
-                  borderRadius: 6,
-                  padding: "8px 10px",
-                }}
-              >
-                <div style={{ fontSize: 10, color: "#7a8189" }}>{p.year}</div>
-                <div style={{ fontSize: 13, fontWeight: 700, color: "#e8e6df" }}>
-                  {fmtUsd(p.price)}
+            <div
+              style={{
+                marginTop: 16,
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))",
+                gap: 8,
+              }}
+            >
+              {projectedRows.map((p) => (
+                <div
+                  key={p.year}
+                  style={{
+                    border: "1px solid #1c2127",
+                    borderRadius: 6,
+                    padding: "8px 10px",
+                  }}
+                >
+                  <div style={{ fontSize: 10, color: "#7a8189" }}>{p.year}</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#e8e6df" }}>
+                    {fmtUsd(p.price)}
+                  </div>
+                  <div style={{ fontSize: 10, color: "#c084fc", marginTop: 2 }}>
+                    CAGR: {fmtPct(p.rate)}
+                  </div>
                 </div>
-                <div style={{ fontSize: 10, color: "#c084fc", marginTop: 2 }}>
-                  CAGR: {fmtPct(p.rate)}
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <div style={{ marginTop: 14, fontSize: 11, color: "#5c636b", lineHeight: 1.6 }}>
-            {cagrDecay > 0 ? (
-              <>
-                Começando em {futureCagr}% ao ano e caindo {cagrDecay}% (relativo ao ano
-                anterior) a cada ano, o BTC sairia de {fmtUsd(TODAY.price)} hoje para{" "}
-                {fmtUsd(finalProjectedPrice)} em{" "}
-                {new Date(TODAY.date).getFullYear() + PROJECTION_YEARS}{" "}
-                ({finalMultiple ? finalMultiple.toFixed(1) : "—"}x), com o CAGR anual
-                caindo até {fmtPct(projectedRows[projectedRows.length - 1]?.rate)} no
-                último ano simulado.
-              </>
-            ) : (
-              <>
-                Com {futureCagr}% ao ano constante, o BTC sairia de {fmtUsd(TODAY.price)}{" "}
-                hoje para {fmtUsd(finalProjectedPrice)} em{" "}
-                {new Date(TODAY.date).getFullYear() + PROJECTION_YEARS}{" "}
-                ({finalMultiple ? finalMultiple.toFixed(1) : "—"}x).
-              </>
-            )}
-          </div>
-        </div>
-
-        <div
-          className="bcd-scrollbar"
-          style={{ overflowX: "auto", border: "1px solid #23282f", borderRadius: 8 }}
-        >
-          <table
-            className="bcd-table"
-            style={{
-              width: "100%",
-              borderCollapse: "collapse",
-              fontSize: 13,
-            }}
-          >
-            <thead>
-              <tr style={{ background: "#14181d", color: "#7a8189" }}>
-                <th style={th}>desde</th>
-                <th style={th}>período</th>
-                <th style={th}>preço inicial</th>
-                <th style={th}>preço atual</th>
-                <th style={{ ...th, textAlign: "right" }}>CAGR</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => (
-                <tr key={r.startDate.toISOString()} style={{ borderTop: "1px solid #1c2127" }}>
-                  <td style={td}>
-                    {r.startDate.toLocaleDateString("en-GB", {
-                      year: "numeric",
-                      month: "short",
-                      day: "numeric",
-                    })}
-                  </td>
-                  <td style={{ ...td, color: "#7a8189" }}>
-                    {r.years.toFixed(1)} anos
-                  </td>
-                  <td style={td}>{fmtUsd(r.start)}</td>
-                  <td style={td}>{fmtUsd(r.end)}</td>
-                  <td
-                    style={{
-                      ...td,
-                      textAlign: "right",
-                      fontWeight: 700,
-                      color: r.cagr >= 0 ? "#5fc98d" : "#e8746a",
-                    }}
-                  >
-                    {fmtPct(r.cagr)}
-                  </td>
-                </tr>
               ))}
-            </tbody>
-          </table>
-        </div>
+            </div>
+
+            <div style={{ marginTop: 14, fontSize: 11, color: "#5c636b", lineHeight: 1.6 }}>
+              {cagrDecay > 0 ? (
+                <>
+                  Começando em {futureCagr}% ao ano e caindo {cagrDecay}% (relativo ao ano
+                  anterior) a cada ano, o BTC sairia de {fmtUsd(TODAY.price)} hoje para{" "}
+                  {fmtUsd(finalProjectedPrice)} em{" "}
+                  {new Date(TODAY.date).getFullYear() + PROJECTION_YEARS}{" "}
+                  ({finalMultiple ? finalMultiple.toFixed(1) : "—"}x), com o CAGR anual
+                  caindo até {fmtPct(projectedRows[projectedRows.length - 1]?.rate)} no
+                  último ano simulado.
+                </>
+              ) : (
+                <>
+                  Com {futureCagr}% ao ano constante, o BTC sairia de {fmtUsd(TODAY.price)}{" "}
+                  hoje para {fmtUsd(finalProjectedPrice)} em{" "}
+                  {new Date(TODAY.date).getFullYear() + PROJECTION_YEARS}{" "}
+                  ({finalMultiple ? finalMultiple.toFixed(1) : "—"}x).
+                </>
+              )}{" "}
+              Isso é uma simulação matemática de juros compostos com taxas escolhidas por
+              você, não é previsão nem recomendação, o BTC nunca cresceu de forma
+              constante ano a ano, veja a volatilidade no histórico acima.
+            </div>
+          </div>
+
+          {/* Table */}
+          <div
+            style={{
+              fontSize: 12,
+              color: "#7a8189",
+              marginBottom: 8,
+            }}
+          >
+            CAGR em janelas móveis de {WINDOW} anos. Linhas marcadas "simulado" usam a
+            projeção acima (mude o CAGR/queda pra ver essas linhas mudarem).
+          </div>
+          <div
+            className="bcd-scrollbar"
+            style={{
+              overflowX: "auto",
+              overflowY: "auto",
+              maxHeight: 420,
+              border: "1px solid #23282f",
+              borderRadius: 8,
+            }}
+          >
+            <table
+              className="bcd-table"
+              style={{
+                width: "100%",
+                borderCollapse: "collapse",
+                fontSize: 13,
+              }}
+            >
+              <thead>
+                <tr style={{ background: "#14181d", color: "#7a8189" }}>
+                  <th style={{ ...th, position: "sticky", top: 0, background: "#14181d" }}>período</th>
+                  <th style={{ ...th, position: "sticky", top: 0, background: "#14181d" }}>preço inicial</th>
+                  <th style={{ ...th, position: "sticky", top: 0, background: "#14181d" }}>preço final</th>
+                  <th style={{ ...th, position: "sticky", top: 0, background: "#14181d", textAlign: "right" }}>CAGR</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rollingCagrRows.map((r) => (
+                  <tr key={r.startYear} style={{ borderTop: "1px solid #1c2127" }}>
+                    <td style={td}>
+                      {r.startYear}–{r.endYear}
+                      {r.simulated && (
+                        <span style={{ color: "#c084fc", fontSize: 10, marginLeft: 6 }}>
+                          (simulado)
+                        </span>
+                      )}
+                    </td>
+                    <td style={td}>{fmtUsd(r.start)}</td>
+                    <td style={td}>{fmtUsd(r.end)}</td>
+                    <td
+                      style={{
+                        ...td,
+                        textAlign: "right",
+                        fontWeight: 700,
+                        color: r.cagr >= 0 ? "#5fc98d" : "#e8746a",
+                      }}
+                    >
+                      {fmtPct(r.cagr)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div style={{ marginTop: 16, fontSize: 11, color: "#5c636b", lineHeight: 1.6 }}>
+            Dados fixos embutidos neste artifact (não há chamada de rede em tempo real:
+            artifacts do Claude.ai rodam num sandbox que bloqueia fetch para APIs
+            externas). Preços de 1º de janeiro de cada ano vêm de um levantamento do
+            Yahoo Finance baseado em médias agregadas da CoinGecko. O preço atual é
+            editável no campo do topo, o valor de referência original ({fmtUsd(TODAY.price)},
+            26/jul/2026) veio de CoinDesk/Crypto.com, atualize esse campo com a cotação
+            do dia pra manter as janelas e a simulação corretas. Cada linha da tabela é
+            CAGR = (preço final / preço inicial) ^ (1/{WINDOW}) − 1 entre 1º de janeiro do
+            ano inicial e 1º de janeiro do ano final. Pra 2012-2014 não achei preço de
+            1/jan numa fonte única, usei o fechamento de 31/dez do ano anterior como
+            aproximação. O ano de 2026 usa o preço atual editável como proxy (não é
+            exatamente 1/jan/2026). Linhas "(simulado)" usam anos além de 2026, cujo preço
+            vem da simulação de CAGR/queda acima, mude os sliders e essas linhas mudam
+            junto. O gráfico é desenhado em SVG puro (sem biblioteca de terceiros), depois
+            que três tentativas com uma lib de gráficos não renderizaram as bandas do
+            Power Law de forma confiável. A linha do histórico é uma série mensal
+            aproximada, construída a partir de topos e fundos de ciclo conhecidos, não é
+            uma série oficial de fechamento diário. As linhas violeta tracejadas são as
+            bandas do modelo Bitcoin Power Law (Santostasi), com parâmetros públicos
+            amplamente citados (log10(tendência) = -16.493 + 5.688·log10(dias desde o
+            genesis block), bandas em tendência × 10^±0.4). É um modelo de ajuste
+            histórico, não uma garantia, e como você já viu na sua pesquisa sobre o
+            Long-Term Power Law, os coeficientes variam entre autores e o próprio Cowen
+            documentou como a curvatura vem sendo revisada ao longo do tempo. Para os
+            números exatos, confie na tabela.
+          </div>
+        </>
       </div>
     </div>
   );
