@@ -153,7 +153,10 @@ export default function BtcCagrDashboard() {
 
   useEffect(() => {
     fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd")
-      .then((r) => r.json())
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
       .then((data) => {
         const price = data?.bitcoin?.usd;
         if (price > 0) {
@@ -162,16 +165,19 @@ export default function BtcCagrDashboard() {
           setIsLivePrice(true);
         }
       })
-      .catch(() => {});
+      .catch((err) => console.warn("[BTC] live price fetch failed:", err.message));
 
     fetch("https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=max&interval=daily")
-      .then((r) => r.json())
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
       .then((data) => {
         if (Array.isArray(data?.prices) && data.prices.length > 0) {
           setHistoricalData(data.prices);
         }
       })
-      .catch(() => {});
+      .catch((err) => console.warn("[BTC] historical data fetch failed:", err.message));
   }, []);
 
   function commitPrice(raw) {
