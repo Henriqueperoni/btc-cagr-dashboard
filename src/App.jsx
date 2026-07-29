@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 // Preço do BTC em 1º de janeiro de cada ano. 2015-2025: Yahoo Finance / dados agregados
 // CoinGecko, artigo "Bitcoin's Price Every New Year's Day For Last Decade". 2012-2014: sem
@@ -147,7 +147,32 @@ export default function BtcCagrDashboard() {
   const [currentPrice, setCurrentPrice] = useState(TODAY.price);
   const [priceInput, setPriceInput] = useState(String(TODAY.price));
   const [hoverIdx, setHoverIdx] = useState(null);
+  const [historicalData, setHistoricalData] = useState(null);
+  const [isLivePrice, setIsLivePrice] = useState(false);
   const svgRef = useRef(null);
+
+  useEffect(() => {
+    fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd")
+      .then((r) => r.json())
+      .then((data) => {
+        const price = data?.bitcoin?.usd;
+        if (price > 0) {
+          setCurrentPrice(price);
+          setPriceInput(String(price));
+          setIsLivePrice(true);
+        }
+      })
+      .catch(() => {});
+
+    fetch("https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=max&interval=daily")
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data?.prices) && data.prices.length > 0) {
+          setHistoricalData(data.prices);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   function commitPrice(raw) {
     const n = Number(raw.replace(/[^0-9.]/g, ""));
@@ -216,15 +241,43 @@ export default function BtcCagrDashboard() {
   }, [yearlyPrices]);
 
   const chartData = useMemo(() => {
-    const historical = MONTHLY_SERIES.map(([ym, price]) => {
-      const [y, m] = ym.split("-").map(Number);
-      const dateMs = Date.UTC(y, m - 1, 15);
-      return { date: ym.slice(0, 4), price, ...powerLawBands(dateMs) };
-    });
-    // ponto de junção: substitui o último preço histórico (fixo) pelo preço
-    // atual editável, pra tabela e gráfico ficarem consistentes
-    const [lastY, lastM] = MONTHLY_SERIES[MONTHLY_SERIES.length - 1][0].split("-").map(Number);
-    const lastDateMs = Date.UTC(lastY, lastM - 1, 15);
+    let historical;
+    let lastDateMs;
+
+    if (historicalData) {
+      // Downsample CoinGecko daily data: keep one point per month (last entry of each month),
+      // starting from 2015 so the y-axis isn't crushed by the sub-$100 era.
+      const byMonth = new Map();
+      for (const [tsMs, price] of historicalData) {
+        const d = new Date(tsMs);
+        const y = d.getUTCFullYear();
+        if (y < 2015) continue;
+        const key = `${y}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+        byMonth.set(key, { tsMs, price });
+      }
+      historical = Array.from(byMonth.entries())
+        .sort(([a], [b]) => (a < b ? -1 : 1))
+        .map(([ym, { tsMs, price }]) => ({
+          date: ym.slice(0, 4),
+          price,
+          ...powerLawBands(tsMs),
+        }));
+      const last = historical[historical.length - 1];
+      if (last) {
+        lastDateMs = new Date(last.date + "-07-15").getTime();
+      } else {
+        lastDateMs = Date.UTC(new Date().getUTCFullYear(), 6, 15);
+      }
+    } else {
+      historical = MONTHLY_SERIES.map(([ym, price]) => {
+        const [y, m] = ym.split("-").map(Number);
+        const dateMs = Date.UTC(y, m - 1, 15);
+        return { date: ym.slice(0, 4), price, ...powerLawBands(dateMs) };
+      });
+      const [lastY, lastM] = MONTHLY_SERIES[MONTHLY_SERIES.length - 1][0].split("-").map(Number);
+      lastDateMs = Date.UTC(lastY, lastM - 1, 15);
+    }
+
     const last = {
       ...historical[historical.length - 1],
       price: currentPrice,
@@ -232,11 +285,11 @@ export default function BtcCagrDashboard() {
       ...powerLawBands(lastDateMs),
     };
     const future = projectedRows.map((p) => {
-      const dateMs = Date.UTC(p.year, 6, 26); // julho = mês 6 (0-indexed)
+      const dateMs = Date.UTC(p.year, 6, 26);
       return { date: String(p.year), projected: p.price, ...powerLawBands(dateMs) };
     });
     return [...historical.slice(0, -1), last, ...future];
-  }, [projectedRows, currentPrice]);
+  }, [projectedRows, currentPrice, historicalData]);
 
   const finalProjectedPrice = projectedRows[projectedRows.length - 1]?.price;
   const finalMultiple = finalProjectedPrice ? finalProjectedPrice / currentPrice : null;
@@ -357,7 +410,12 @@ export default function BtcCagrDashboard() {
             </h1>
           </div>
           <div style={{ textAlign: "right", fontSize: 12, color: "#7a8189" }}>
-            <div style={{ marginBottom: 4 }}>preço atual (editável)</div>
+            <div style={{ marginBottom: 4, display: "flex", alignItems: "center", gap: 6 }}>
+              preço atual (editável)
+              {isLivePrice
+                ? <span style={{ color: "#4ade80", fontSize: 10 }}>● live</span>
+                : <span style={{ color: "#5c636b", fontSize: 10 }}>● fallback</span>}
+            </div>
             <div
               style={{
                 display: "flex",
