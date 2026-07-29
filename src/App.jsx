@@ -794,34 +794,6 @@ export default function BtcCagrDashboard() {
               </tbody>
             </table>
           </div>
-
-          <div style={{ marginTop: 16, fontSize: 11, color: "#5c636b", lineHeight: 1.6 }}>
-            Dados fixos embutidos neste artifact (não há chamada de rede em tempo real:
-            artifacts do Claude.ai rodam num sandbox que bloqueia fetch para APIs
-            externas). Preços de 1º de janeiro de cada ano vêm de um levantamento do
-            Yahoo Finance baseado em médias agregadas da CoinGecko. O preço atual é
-            editável no campo do topo, o valor de referência original ({fmtUsd(TODAY.price)},
-            26/jul/2026) veio de CoinDesk/Crypto.com, atualize esse campo com a cotação
-            do dia pra manter as janelas e a simulação corretas. Cada linha da tabela é
-            CAGR = (preço final / preço inicial) ^ (1/{WINDOW}) − 1 entre 1º de janeiro do
-            ano inicial e 1º de janeiro do ano final. Pra 2012-2014 não achei preço de
-            1/jan numa fonte única, usei o fechamento de 31/dez do ano anterior como
-            aproximação. O ano de 2026 usa o preço atual editável como proxy (não é
-            exatamente 1/jan/2026). Linhas "(simulado)" usam anos além de 2026, cujo preço
-            vem da simulação de CAGR/queda acima, mude os sliders e essas linhas mudam
-            junto. O gráfico é desenhado em SVG puro (sem biblioteca de terceiros), depois
-            que três tentativas com uma lib de gráficos não renderizaram as bandas do
-            Power Law de forma confiável. A linha do histórico é uma série mensal
-            aproximada, construída a partir de topos e fundos de ciclo conhecidos, não é
-            uma série oficial de fechamento diário. As linhas violeta tracejadas são as
-            bandas do modelo Bitcoin Power Law (Santostasi), com parâmetros públicos
-            amplamente citados (log10(tendência) = -16.493 + 5.688·log10(dias desde o
-            genesis block), bandas em tendência × 10^±0.4). É um modelo de ajuste
-            histórico, não uma garantia, e como você já viu na sua pesquisa sobre o
-            Long-Term Power Law, os coeficientes variam entre autores e o próprio Cowen
-            documentou como a curvatura vem sendo revisada ao longo do tempo. Para os
-            números exatos, confie na tabela.
-          </div>
         </>
       </div>
     </div>
