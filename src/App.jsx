@@ -139,6 +139,68 @@ function fmtTick(v) {
   return "$" + v;
 }
 
+function CagrInput({ year, rate, isOverridden, onCommit }) {
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState("");
+
+  function startEdit() {
+    setVal((rate * 100).toFixed(1));
+    setEditing(true);
+  }
+
+  function commit(raw) {
+    setEditing(false);
+    if (raw.trim() === "") {
+      onCommit(year, null);
+      return;
+    }
+    const n = parseFloat(raw);
+    if (isFinite(n)) onCommit(year, n);
+  }
+
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        type="number"
+        value={val}
+        onChange={(e) => setVal(e.target.value)}
+        onBlur={(e) => commit(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") commit(val);
+          if (e.key === "Escape") setEditing(false);
+        }}
+        style={{
+          fontFamily: "inherit",
+          fontSize: 10,
+          width: 52,
+          background: "#0b0e11",
+          border: "1px solid #c084fc",
+          borderRadius: 3,
+          color: "#c084fc",
+          padding: "1px 4px",
+          textAlign: "right",
+        }}
+      />
+    );
+  }
+
+  return (
+    <span
+      onClick={startEdit}
+      title="clique para editar"
+      style={{
+        color: isOverridden ? "#f5b544" : "#c084fc",
+        cursor: "text",
+        borderBottom: "1px dashed",
+        borderColor: isOverridden ? "#f5b544" : "#c084fc",
+      }}
+    >
+      CAGR: {(rate * 100).toFixed(1)}%
+    </span>
+  );
+}
+
 export default function BtcCagrDashboard() {
   const [logScale, setLogScale] = useState(true);
   const [showPowerLaw, setShowPowerLaw] = useState(true);
@@ -149,6 +211,7 @@ export default function BtcCagrDashboard() {
   const [hoverIdx, setHoverIdx] = useState(null);
   const [historicalData, setHistoricalData] = useState(null);
   const [isLivePrice, setIsLivePrice] = useState(false);
+  const [cagrOverrides, setCagrOverrides] = useState({});
   const svgRef = useRef(null);
 
   useEffect(() => {
@@ -190,20 +253,23 @@ export default function BtcCagrDashboard() {
     }
   }
 
+  const baseRate = (yearIndex) =>
+    (futureCagr / 100) * Math.pow(1 - cagrDecay / 100, yearIndex - 1);
+
   const projectedRows = useMemo(() => {
-    const r0 = futureCagr / 100;
-    const decay = cagrDecay / 100;
     const startYear = new Date(TODAY.date).getFullYear();
     let price = currentPrice;
-    let rate = r0;
     const out = [];
     for (let i = 0; i < PROJECTION_YEARS; i++) {
-      if (i > 0) rate = rate * (1 - decay);
+      const yearIndex = i + 1;
+      const year = startYear + yearIndex;
+      const rate =
+        cagrOverrides[year] != null ? cagrOverrides[year] / 100 : baseRate(yearIndex);
       price = price * (1 + rate);
-      out.push({ year: startYear + i + 1, price, rate });
+      out.push({ year, price, rate, isOverridden: cagrOverrides[year] != null });
     }
     return out;
-  }, [futureCagr, cagrDecay, currentPrice]);
+  }, [futureCagr, cagrDecay, currentPrice, cagrOverrides]);
 
   // mapa ano -> preço, combinando histórico (1/jan), o preço atual (editável, usado
   // como proxy do ano corrente) e a simulação (anos futuros)
@@ -752,21 +818,59 @@ export default function BtcCagrDashboard() {
                 <div
                   key={p.year}
                   style={{
-                    border: "1px solid #1c2127",
+                    border: `1px solid ${p.isOverridden ? "#f5b544" : "#1c2127"}`,
                     borderRadius: 6,
                     padding: "8px 10px",
+                    position: "relative",
                   }}
                 >
-                  <div style={{ fontSize: 10, color: "#7a8189" }}>{p.year}</div>
+                  <div style={{ fontSize: 10, color: "#7a8189", display: "flex", justifyContent: "space-between" }}>
+                    <span>{p.year}</span>
+                    {p.isOverridden && (
+                      <span style={{ color: "#f5b544", fontSize: 9, letterSpacing: "0.04em" }}>editado</span>
+                    )}
+                  </div>
                   <div style={{ fontSize: 13, fontWeight: 700, color: "#e8e6df" }}>
                     {fmtUsd(p.price)}
                   </div>
-                  <div style={{ fontSize: 10, color: "#c084fc", marginTop: 2 }}>
-                    CAGR: {fmtPct(p.rate)}
+                  <div style={{ fontSize: 10, marginTop: 2 }}>
+                    <CagrInput
+                      year={p.year}
+                      rate={p.rate}
+                      isOverridden={p.isOverridden}
+                      onCommit={(year, pct) => {
+                        setCagrOverrides((prev) => {
+                          const next = { ...prev };
+                          if (pct == null) delete next[year];
+                          else next[year] = pct;
+                          return next;
+                        });
+                      }}
+                    />
                   </div>
                 </div>
               ))}
             </div>
+
+            {Object.keys(cagrOverrides).length > 0 && (
+              <div style={{ marginTop: 10, textAlign: "right" }}>
+                <button
+                  onClick={() => setCagrOverrides({})}
+                  style={{
+                    fontFamily: "inherit",
+                    fontSize: 11,
+                    color: "#7a8189",
+                    background: "none",
+                    border: "1px solid #23282f",
+                    borderRadius: 4,
+                    padding: "4px 10px",
+                    cursor: "pointer",
+                  }}
+                >
+                  limpar edições manuais
+                </button>
+              </div>
+            )}
 
             <div style={{ marginTop: 14, fontSize: 11, color: "#5c636b", lineHeight: 1.6 }}>
               {cagrDecay > 0 ? (
