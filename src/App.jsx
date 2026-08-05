@@ -202,6 +202,7 @@ function CagrInput({ year, rate, isOverridden, onCommit }) {
 }
 
 export default function BtcCagrDashboard() {
+  const [activeTab, setActiveTab] = useState('cagr'); // 'cagr' | 'retirement'
   const [logScale, setLogScale] = useState(true);
   const [showPowerLaw, setShowPowerLaw] = useState(true);
   const [futureCagr, setFutureCagr] = useState(30); // % ao ano
@@ -213,6 +214,27 @@ export default function BtcCagrDashboard() {
   const [isLivePrice, setIsLivePrice] = useState(false);
   const [cagrOverrides, setCagrOverrides] = useState({});
   const svgRef = useRef(null);
+
+  // Retirement planner state
+  const [currentAge, setCurrentAge] = useState(30);
+  const [currentAgeInput, setCurrentAgeInput] = useState("30");
+  const [retirementPortfolio, setRetirementPortfolio] = useState(500000);
+  const [retirementPortfolioInput, setRetirementPortfolioInput] = useState("500000");
+  const [retirementYear, setRetirementYear] = useState(() => {
+    const currentYear = new Date(TODAY.date).getFullYear();
+    return currentYear + 10;
+  });
+  const [retirementYearInput, setRetirementYearInput] = useState(() => {
+    const currentYear = new Date(TODAY.date).getFullYear();
+    return String(currentYear + 10);
+  });
+  const [desiredAnnualIncome, setDesiredAnnualIncome] = useState(40000);
+  const [desiredIncomeInput, setDesiredIncomeInput] = useState("40000");
+  const [inflationRate, setInflationRate] = useState(3);
+  const [postRetirementGrowth, setPostRetirementGrowth] = useState(8);
+  const [withdrawalRate, setWithdrawalRate] = useState(4);
+  const [drawdownYears, setDrawdownYears] = useState(30);
+  const [drawdownYearsInput, setDrawdownYearsInput] = useState("30");
 
   useEffect(() => {
     fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd")
@@ -251,6 +273,78 @@ export default function BtcCagrDashboard() {
     } else {
       setPriceInput(String(currentPrice));
     }
+  }
+
+  function commitRetirementPortfolio(raw) {
+    const n = Number(raw.replace(/[^0-9.]/g, ""));
+    if (n > 0) {
+      setRetirementPortfolio(n);
+      setRetirementPortfolioInput(String(n));
+    } else {
+      setRetirementPortfolioInput(String(retirementPortfolio));
+    }
+  }
+
+  function commitRetirementYear(raw) {
+    const n = parseInt(raw, 10);
+    const currentYear = new Date(TODAY.date).getFullYear();
+    if (isFinite(n) && n > currentYear) {
+      setRetirementYear(n);
+      setRetirementYearInput(String(n));
+    } else {
+      setRetirementYearInput(String(retirementYear));
+    }
+  }
+
+  function commitDesiredIncome(raw) {
+    const n = Number(raw.replace(/[^0-9.]/g, ""));
+    if (n > 0) {
+      setDesiredAnnualIncome(n);
+      setDesiredIncomeInput(String(n));
+    } else {
+      setDesiredIncomeInput(String(desiredAnnualIncome));
+    }
+  }
+
+  function commitDrawdownYears(raw) {
+    const n = parseInt(raw, 10);
+    if (isFinite(n) && n > 0) {
+      setDrawdownYears(n);
+      setDrawdownYearsInput(String(n));
+    } else {
+      setDrawdownYearsInput(String(drawdownYears));
+    }
+  }
+
+  function commitCurrentAge(raw) {
+    const n = parseInt(raw, 10);
+    if (isFinite(n) && n > 0 && n < 120) {
+      setCurrentAge(n);
+      setCurrentAgeInput(String(n));
+    } else {
+      setCurrentAgeInput(String(currentAge));
+    }
+  }
+
+  function isValidRetirementYear(raw) {
+    const n = parseInt(raw, 10);
+    const currentYear = new Date(TODAY.date).getFullYear();
+    return raw.trim() !== "" && isFinite(n) && n > currentYear;
+  }
+
+  function isValidPositiveNumber(raw) {
+    const n = Number(raw.replace(/[^0-9.]/g, ""));
+    return raw.trim() !== "" && isFinite(n) && n > 0;
+  }
+
+  function isValidPositiveInteger(raw) {
+    const n = parseInt(raw, 10);
+    return raw.trim() !== "" && isFinite(n) && n > 0;
+  }
+
+  function isValidAge(raw) {
+    const n = parseInt(raw, 10);
+    return raw.trim() !== "" && isFinite(n) && n > 0 && n < 120;
   }
 
   const baseRate = (yearIndex) =>
@@ -365,6 +459,75 @@ export default function BtcCagrDashboard() {
 
   const finalProjectedPrice = projectedRows[projectedRows.length - 1]?.price;
   const finalMultiple = finalProjectedPrice ? finalProjectedPrice / currentPrice : null;
+
+  // Retirement calculations
+  const retirementCalc = useMemo(() => {
+    const currentYear = new Date(TODAY.date).getFullYear();
+    const yearsToRetirement = retirementYear - currentYear;
+    const retirementAge = currentAge + yearsToRetirement;
+    const endAge = retirementAge + drawdownYears;
+
+    // Use manual portfolio value
+    const portfolioValueAtRetirement = retirementPortfolio;
+
+    // Target calculation - no need for years to retirement adjustment since we're using today's dollars
+    const nominalIncomeAtRetirement = desiredAnnualIncome; // in today's dollars
+    const safeWithdrawalRate = Math.max(0.5, withdrawalRate) / 100;
+    const requiredPortfolio = nominalIncomeAtRetirement / safeWithdrawalRate;
+    const fundedPercent = (portfolioValueAtRetirement / requiredPortfolio) * 100;
+
+    // Drawdown simulation
+    const drawdownTable = [];
+    let balance = portfolioValueAtRetirement;
+    let withdrawal = nominalIncomeAtRetirement;
+    let depletionYear = null;
+    let depletionAge = null;
+
+    for (let i = 0; i < drawdownYears; i++) {
+      const year = retirementYear + i;
+      const age = retirementAge + i;
+      const endingBalance = balance - withdrawal;
+
+      if (endingBalance <= 0 && depletionYear == null) {
+        depletionYear = year;
+        depletionAge = age;
+        drawdownTable.push({ year, age, withdrawal, balance: 0, depleted: true });
+        break;
+      }
+
+      drawdownTable.push({ year, age, withdrawal, balance: endingBalance, depleted: false });
+
+      balance = endingBalance * (1 + postRetirementGrowth / 100);
+      withdrawal = withdrawal * (1 + inflationRate / 100);
+    }
+
+    // Calculate final balance (what's left at death or end of simulation)
+    const finalBalance = drawdownTable.length > 0
+      ? drawdownTable[drawdownTable.length - 1].balance
+      : portfolioValueAtRetirement;
+
+    return {
+      portfolioValueAtRetirement,
+      nominalIncomeAtRetirement,
+      requiredPortfolio,
+      fundedPercent,
+      drawdownTable,
+      depletionYear,
+      depletionAge,
+      finalBalance,
+      retirementAge,
+      endAge,
+    };
+  }, [
+    currentAge,
+    retirementPortfolio,
+    retirementYear,
+    desiredAnnualIncome,
+    inflationRate,
+    postRetirementGrowth,
+    withdrawalRate,
+    drawdownYears,
+  ]);
 
   // ---- geometria calculada a partir dos dados ----
   const geo = useMemo(() => {
@@ -524,7 +687,52 @@ export default function BtcCagrDashboard() {
           </div>
         </div>
 
-        <>
+        {/* Tab Switcher */}
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            marginBottom: 24,
+            borderBottom: "1px solid #23282f",
+          }}
+        >
+          <button
+            onClick={() => setActiveTab('cagr')}
+            style={{
+              fontFamily: "inherit",
+              fontSize: 13,
+              fontWeight: 500,
+              color: activeTab === 'cagr' ? "#f5b544" : "#7a8189",
+              background: "none",
+              border: "none",
+              borderBottom: activeTab === 'cagr' ? "2px solid #f5b544" : "2px solid transparent",
+              padding: "8px 16px",
+              cursor: "pointer",
+              transition: "all 0.15s ease",
+            }}
+          >
+            CAGR Dashboard
+          </button>
+          <button
+            onClick={() => setActiveTab('retirement')}
+            style={{
+              fontFamily: "inherit",
+              fontSize: 13,
+              fontWeight: 500,
+              color: activeTab === 'retirement' ? "#f5b544" : "#7a8189",
+              background: "none",
+              border: "none",
+              borderBottom: activeTab === 'retirement' ? "2px solid #f5b544" : "2px solid transparent",
+              padding: "8px 16px",
+              cursor: "pointer",
+              transition: "all 0.15s ease",
+            }}
+          >
+            Aposentadoria
+          </button>
+        </div>
+
+        {activeTab === 'cagr' && <>
           {/* Chart */}
           <div
             style={{
@@ -962,7 +1170,488 @@ export default function BtcCagrDashboard() {
               </tbody>
             </table>
           </div>
-        </>
+        </>}
+
+        {activeTab === 'retirement' && (
+          <>
+            {/* Retirement Planner Inputs */}
+            <div
+              style={{
+                border: "1px solid #23282f",
+                borderRadius: 8,
+                padding: "18px 20px",
+                marginBottom: 24,
+                background: "#0e1216",
+              }}
+            >
+              <div style={{ fontSize: 14, fontWeight: 500, color: "#7a8189", marginBottom: 16 }}>
+                Parâmetros da aposentadoria
+              </div>
+
+              {/* Current Age */}
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 12, color: "#7a8189", display: "block", marginBottom: 6 }}>
+                  Idade atual
+                </label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={currentAgeInput}
+                  onChange={(e) => setCurrentAgeInput(e.target.value)}
+                  onBlur={(e) => commitCurrentAge(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") commitCurrentAge(currentAgeInput);
+                  }}
+                  style={{
+                    fontFamily: "inherit",
+                    fontSize: 14,
+                    color: "#e8e6df",
+                    background: "#14181d",
+                    border: `1px solid ${isValidAge(currentAgeInput) ? "#23282f" : "#e8746a"}`,
+                    borderRadius: 4,
+                    padding: "6px 10px",
+                    width: "100%",
+                  }}
+                />
+                {!isValidAge(currentAgeInput) && (
+                  <div style={{ fontSize: 10, color: "#e8746a", marginTop: 4 }}>
+                    Digite uma idade válida (1-119)
+                  </div>
+                )}
+              </div>
+
+              {/* Portfolio at Retirement */}
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 12, color: "#7a8189", display: "block", marginBottom: 6 }}>
+                  Patrimônio na aposentadoria (USD)
+                </label>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={retirementPortfolioInput}
+                  onChange={(e) => setRetirementPortfolioInput(e.target.value)}
+                  onBlur={(e) => commitRetirementPortfolio(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") commitRetirementPortfolio(retirementPortfolioInput);
+                  }}
+                  style={{
+                    fontFamily: "inherit",
+                    fontSize: 14,
+                    color: "#e8e6df",
+                    background: "#14181d",
+                    border: `1px solid ${isValidPositiveNumber(retirementPortfolioInput) ? "#23282f" : "#e8746a"}`,
+                    borderRadius: 4,
+                    padding: "6px 10px",
+                    width: "100%",
+                  }}
+                />
+                {!isValidPositiveNumber(retirementPortfolioInput) && (
+                  <div style={{ fontSize: 10, color: "#e8746a", marginTop: 4 }}>
+                    Digite um valor positivo
+                  </div>
+                )}
+              </div>
+
+              {/* Retirement Year */}
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 12, color: "#7a8189", display: "block", marginBottom: 6 }}>
+                  Ano de aposentadoria
+                </label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={retirementYearInput}
+                  onChange={(e) => setRetirementYearInput(e.target.value)}
+                  onBlur={(e) => commitRetirementYear(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") commitRetirementYear(retirementYearInput);
+                  }}
+                  style={{
+                    fontFamily: "inherit",
+                    fontSize: 14,
+                    color: "#e8e6df",
+                    background: "#14181d",
+                    border: `1px solid ${isValidRetirementYear(retirementYearInput) ? "#23282f" : "#e8746a"}`,
+                    borderRadius: 4,
+                    padding: "6px 10px",
+                    width: "100%",
+                  }}
+                />
+                {!isValidRetirementYear(retirementYearInput) && (
+                  <div style={{ fontSize: 10, color: "#e8746a", marginTop: 4 }}>
+                    Digite um ano futuro (atual: {new Date(TODAY.date).getFullYear()})
+                  </div>
+                )}
+              </div>
+
+              {/* Desired Annual Income */}
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 12, color: "#7a8189", display: "block", marginBottom: 6 }}>
+                  Renda anual desejada (USD, em valores de hoje)
+                </label>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={desiredIncomeInput}
+                  onChange={(e) => setDesiredIncomeInput(e.target.value)}
+                  onBlur={(e) => commitDesiredIncome(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") commitDesiredIncome(desiredIncomeInput);
+                  }}
+                  style={{
+                    fontFamily: "inherit",
+                    fontSize: 14,
+                    color: "#e8e6df",
+                    background: "#14181d",
+                    border: `1px solid ${isValidPositiveNumber(desiredIncomeInput) ? "#23282f" : "#e8746a"}`,
+                    borderRadius: 4,
+                    padding: "6px 10px",
+                    width: "100%",
+                  }}
+                />
+                {!isValidPositiveNumber(desiredIncomeInput) && (
+                  <div style={{ fontSize: 10, color: "#e8746a", marginTop: 4 }}>
+                    Digite um valor positivo
+                  </div>
+                )}
+              </div>
+
+              {/* Inflation Rate Slider */}
+              <div style={{ marginBottom: 16 }}>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "baseline",
+                    marginBottom: 10,
+                  }}
+                >
+                  <span style={{ fontSize: 12, color: "#7a8189" }}>Taxa de inflação anual</span>
+                  <span style={{ fontSize: 18, fontWeight: 700, color: "#5fc9e8" }}>
+                    {inflationRate}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={15}
+                  step={0.5}
+                  value={inflationRate}
+                  onChange={(e) => setInflationRate(Number(e.target.value))}
+                  style={{
+                    width: "100%",
+                    accentColor: "#5fc9e8",
+                    cursor: "pointer",
+                  }}
+                />
+              </div>
+
+              {/* Post-Retirement Growth Slider */}
+              <div style={{ marginBottom: 16 }}>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "baseline",
+                    marginBottom: 10,
+                  }}
+                >
+                  <span style={{ fontSize: 12, color: "#7a8189" }}>
+                    Crescimento pós-aposentadoria
+                  </span>
+                  <span style={{ fontSize: 18, fontWeight: 700, color: "#c084fc" }}>
+                    {postRetirementGrowth}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={-10}
+                  max={30}
+                  step={0.5}
+                  value={postRetirementGrowth}
+                  onChange={(e) => setPostRetirementGrowth(Number(e.target.value))}
+                  style={{
+                    width: "100%",
+                    accentColor: "#c084fc",
+                    cursor: "pointer",
+                  }}
+                />
+              </div>
+
+              {/* Withdrawal Rate Slider */}
+              <div style={{ marginBottom: 16 }}>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "baseline",
+                    marginBottom: 10,
+                  }}
+                >
+                  <span style={{ fontSize: 12, color: "#7a8189" }}>Taxa de saque anual</span>
+                  <span style={{ fontSize: 18, fontWeight: 700, color: "#5fc98d" }}>
+                    {withdrawalRate}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0.5}
+                  max={10}
+                  step={0.5}
+                  value={withdrawalRate}
+                  onChange={(e) => setWithdrawalRate(Number(e.target.value))}
+                  style={{
+                    width: "100%",
+                    accentColor: "#5fc98d",
+                    cursor: "pointer",
+                  }}
+                />
+              </div>
+
+              {/* Drawdown Years */}
+              <div>
+                <label style={{ fontSize: 12, color: "#7a8189", display: "block", marginBottom: 6 }}>
+                  Anos de simulação de saque
+                </label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={drawdownYearsInput}
+                  onChange={(e) => setDrawdownYearsInput(e.target.value)}
+                  onBlur={(e) => commitDrawdownYears(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") commitDrawdownYears(drawdownYearsInput);
+                  }}
+                  style={{
+                    fontFamily: "inherit",
+                    fontSize: 14,
+                    color: "#e8e6df",
+                    background: "#14181d",
+                    border: `1px solid ${isValidPositiveInteger(drawdownYearsInput) ? "#23282f" : "#e8746a"}`,
+                    borderRadius: 4,
+                    padding: "6px 10px",
+                    width: "100%",
+                  }}
+                />
+                {!isValidPositiveInteger(drawdownYearsInput) && (
+                  <div style={{ fontSize: 10, color: "#e8746a", marginTop: 4 }}>
+                    Digite um número inteiro positivo
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Summary Cards */}
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+                gap: 12,
+                marginBottom: 24,
+              }}
+            >
+              <div
+                style={{
+                  border: "1px solid #23282f",
+                  borderRadius: 6,
+                  padding: "14px 16px",
+                  background: "#0e1216",
+                }}
+              >
+                <div style={{ fontSize: 11, color: "#7a8189", marginBottom: 4 }}>
+                  Idade na aposentadoria
+                </div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: "#5fc9e8" }}>
+                  {retirementCalc.retirementAge} anos
+                </div>
+                <div style={{ fontSize: 10, color: "#5c636b", marginTop: 4 }}>
+                  em {retirementYear}
+                </div>
+              </div>
+
+              <div
+                style={{
+                  border: "1px solid #23282f",
+                  borderRadius: 6,
+                  padding: "14px 16px",
+                  background: "#0e1216",
+                }}
+              >
+                <div style={{ fontSize: 11, color: "#7a8189", marginBottom: 4 }}>
+                  Anos na aposentadoria
+                </div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: "#c084fc" }}>
+                  {drawdownYears} anos
+                </div>
+                <div style={{ fontSize: 10, color: "#5c636b", marginTop: 4 }}>
+                  até {retirementCalc.endAge} anos
+                </div>
+              </div>
+
+              <div
+                style={{
+                  border: "1px solid #23282f",
+                  borderRadius: 6,
+                  padding: "14px 16px",
+                  background: "#0e1216",
+                }}
+              >
+                <div style={{ fontSize: 11, color: "#7a8189", marginBottom: 4 }}>
+                  Renda anual desejada
+                </div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: "#5fc98d" }}>
+                  {fmtUsd(retirementCalc.nominalIncomeAtRetirement)}
+                </div>
+                <div style={{ fontSize: 10, color: "#5c636b", marginTop: 4 }}>
+                  em valores de hoje
+                </div>
+              </div>
+
+              <div
+                style={{
+                  border: `1px solid ${
+                    retirementCalc.finalBalance > 0
+                      ? "#5fc98d"
+                      : "#e8746a"
+                  }`,
+                  borderRadius: 6,
+                  padding: "14px 16px",
+                  background: "#0e1216",
+                }}
+              >
+                <div style={{ fontSize: 11, color: "#7a8189", marginBottom: 4 }}>
+                  Saldo ao final
+                </div>
+                <div
+                  style={{
+                    fontSize: 20,
+                    fontWeight: 700,
+                    color: retirementCalc.finalBalance > 0 ? "#5fc98d" : "#e8746a",
+                  }}
+                >
+                  {fmtUsd(retirementCalc.finalBalance)}
+                </div>
+                <div style={{ fontSize: 10, color: retirementCalc.depletionAge ? "#e8746a" : "#5c636b", marginTop: 4 }}>
+                  {retirementCalc.depletionAge
+                    ? `acaba aos ${retirementCalc.depletionAge} anos`
+                    : `sobra aos ${retirementCalc.endAge} anos`}
+                </div>
+              </div>
+            </div>
+
+            {/* Drawdown Table */}
+            <div
+              style={{
+                fontSize: 12,
+                color: "#7a8189",
+                marginBottom: 8,
+              }}
+            >
+              Simulação de saques anuais após a aposentadoria em {retirementYear} (idade {retirementCalc.retirementAge})
+            </div>
+            <div
+              className="bcd-scrollbar"
+              style={{
+                overflowX: "auto",
+                overflowY: "auto",
+                maxHeight: 420,
+                border: "1px solid #23282f",
+                borderRadius: 8,
+                marginBottom: 24,
+              }}
+            >
+              <table
+                className="bcd-table"
+                style={{
+                  width: "100%",
+                  borderCollapse: "collapse",
+                  fontSize: 13,
+                }}
+              >
+                <thead>
+                  <tr style={{ background: "#14181d", color: "#7a8189" }}>
+                    <th style={{ ...th, position: "sticky", top: 0, background: "#14181d" }}>
+                      ano
+                    </th>
+                    <th style={{ ...th, position: "sticky", top: 0, background: "#14181d" }}>
+                      idade
+                    </th>
+                    <th style={{ ...th, position: "sticky", top: 0, background: "#14181d", textAlign: "right" }}>
+                      saque
+                    </th>
+                    <th style={{ ...th, position: "sticky", top: 0, background: "#14181d", textAlign: "right" }}>
+                      saldo restante
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {retirementCalc.drawdownTable.map((row) => (
+                    <tr
+                      key={row.year}
+                      style={{
+                        borderTop: "1px solid #1c2127",
+                        background: row.depleted ? "#1a0f0f" : "transparent",
+                      }}
+                    >
+                      <td style={td}>
+                        {row.year}
+                      </td>
+                      <td style={td}>
+                        {row.age}
+                        {row.depleted && (
+                          <span style={{ color: "#e8746a", fontSize: 10, marginLeft: 8 }}>
+                            dinheiro acaba
+                          </span>
+                        )}
+                      </td>
+                      <td
+                        style={{
+                          ...td,
+                          textAlign: "right",
+                          color: row.depleted ? "#e8746a" : "#e8e6df",
+                        }}
+                      >
+                        {fmtUsd(row.withdrawal)}
+                      </td>
+                      <td
+                        style={{
+                          ...td,
+                          textAlign: "right",
+                          fontWeight: 700,
+                          color: row.depleted ? "#e8746a" : "#5fc98d",
+                        }}
+                      >
+                        {fmtUsd(row.balance)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Caveat */}
+            <div
+              style={{
+                fontSize: 11,
+                color: "#5c636b",
+                lineHeight: 1.6,
+                padding: "12px 16px",
+                border: "1px solid #23282f",
+                borderRadius: 6,
+                background: "#0e1216",
+              }}
+            >
+              <strong style={{ color: "#7a8189" }}>Avisos importantes:</strong> Esta
+              simulação usa um patrimônio inicial que você define manualmente. A inflação ({inflationRate}%)
+              aumenta os saques anuais para manter o poder de compra constante. O crescimento
+              pós-aposentadoria ({postRetirementGrowth}%) é uma taxa fixa que não modela ciclos
+              ou volatilidade. O "Saldo ao final" mostra quanto sobraria após {drawdownYears} anos
+              de saques, ou zero se o dinheiro acabar antes. Esta é uma ferramenta educacional
+              simplificada, não é aconselhamento financeiro. Não considera impostos, taxas de
+              corretagem, ou outros custos reais.
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
