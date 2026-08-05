@@ -204,8 +204,8 @@ function CagrInput({ year, rate, isOverridden, onCommit }) {
 export default function BtcCagrDashboard() {
   const [logScale, setLogScale] = useState(true);
   const [showPowerLaw, setShowPowerLaw] = useState(true);
-  const [futureCagr, setFutureCagr] = useState(25); // % ao ano
-  const [cagrDecay, setCagrDecay] = useState(10); // % de queda do CAGR a cada ano
+  const [futureCagr, setFutureCagr] = useState(30); // % ao ano
+  const [cagrDecay, setCagrDecay] = useState(5); // % de queda do CAGR a cada ano
   const [currentPrice, setCurrentPrice] = useState(TODAY.price);
   const [priceInput, setPriceInput] = useState(String(TODAY.price));
   const [hoverIdx, setHoverIdx] = useState(null);
