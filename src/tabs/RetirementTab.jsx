@@ -191,6 +191,7 @@ export default function RetirementTab() {
           accent={colors.violet}
         />
 
+        {/* commenting out the withdrawal rate slider as it doesn't do anything in the current implementation */}
         {/* <PercentSlider
           label="Taxa de saque anual"
           value={withdrawalRate}
