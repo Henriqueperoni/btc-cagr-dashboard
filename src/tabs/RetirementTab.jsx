@@ -199,7 +199,7 @@ export default function RetirementTab() {
           min={0.5}
           max={10}
           accent={colors.green}
-        /> */}
+        /> */} 
 
         {/* Anos de simulação de saque — sem margem inferior por ser o último campo */}
         <div style={{ marginBottom: -16 }}>
