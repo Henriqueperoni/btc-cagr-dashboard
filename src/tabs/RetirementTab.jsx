@@ -186,19 +186,19 @@ export default function RetirementTab() {
           label="Crescimento pós-aposentadoria"
           value={postRetirementGrowth}
           onChange={setPostRetirementGrowth}
-          min={-10}
+          min={0}
           max={30}
           accent={colors.violet}
         />
 
-        <PercentSlider
+        {/* <PercentSlider
           label="Taxa de saque anual"
           value={withdrawalRate}
           onChange={setWithdrawalRate}
           min={0.5}
           max={10}
           accent={colors.green}
-        />
+        /> */}
 
         {/* Anos de simulação de saque — sem margem inferior por ser o último campo */}
         <div style={{ marginBottom: -16 }}>
